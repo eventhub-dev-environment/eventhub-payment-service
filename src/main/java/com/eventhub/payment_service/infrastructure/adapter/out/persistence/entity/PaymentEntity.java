@@ -2,37 +2,47 @@ package com.eventhub.payment_service.infrastructure.adapter.out.persistence.enti
 
 import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.model.PaymentStatus;
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.index.Indexed;
-import org.springframework.data.mongodb.core.mapping.Document;
+import jakarta.persistence.*;
+import lombok.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
-@Data
+@Entity
+@Table(name = "payments")
+@Getter
+@Setter
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Document(collection = "payments")
-public class PaymentDocument {
+public class PaymentEntity {
 
     @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
     private String id;
 
-    @Indexed
+    @Column(nullable = false)
     private String bookingId;
 
-    @Indexed(unique = true, sparse = true)
+    @Column(unique = true)
     private String transactionId;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
     private PaymentProvider provider;
+
+    @Column(nullable = false, precision = 10, scale = 2)
     private BigDecimal amount;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
     private PaymentStatus status;
+
+    @Column(columnDefinition = "TEXT")
     private String rawPayload;
+
+    @Column(nullable = false)
     private LocalDateTime createdAt;
+
     private LocalDateTime updatedAt;
 }
