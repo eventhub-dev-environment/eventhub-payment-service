@@ -4,5 +4,6 @@ public enum PaymentProvider {
     BOLD,
     WOMPI,
     MERCADOPAGO,
-    PAYU
+    PAYU,
+    STRIPE
 }
