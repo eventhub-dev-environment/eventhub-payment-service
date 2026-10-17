@@ -17,6 +17,7 @@ public class Payment {
     private String bookingId;
     private String transactionId; // ID entregado por la pasarela de pagos
     private String idempotencyKey;
+    private String refundId;
     private PaymentProvider provider;
     private BigDecimal amount;
     private String currency;

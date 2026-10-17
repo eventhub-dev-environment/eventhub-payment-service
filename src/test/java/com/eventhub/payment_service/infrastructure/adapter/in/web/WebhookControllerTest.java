@@ -5,10 +5,12 @@ import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.model.PaymentStatus;
 import com.eventhub.payment_service.domain.port.in.GetPaymentUseCase;
 import com.eventhub.payment_service.domain.port.in.ProcessWebhookUseCase;
+import com.eventhub.payment_service.infrastructure.adapter.out.booking.BookingServiceClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Validation;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -17,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
 import java.util.Optional;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -64,11 +67,50 @@ class WebhookControllerTest {
                 org.mockito.ArgumentMatchers.anyString());
     }
 
+    @Test
+    void requiresBookingOwnershipBeforeReturningPayment() {
+        ProcessWebhookUseCase processWebhook = mock(ProcessWebhookUseCase.class);
+        GetPaymentUseCase getPayment = mock(GetPaymentUseCase.class);
+        BookingServiceClient bookingServiceClient = mock(BookingServiceClient.class);
+        Payment payment = Payment.builder().id("payment-123").build();
+        when(getPayment.getByBookingId("booking-123")).thenReturn(Optional.of(payment));
+        WebhookController controller = controller(processWebhook, getPayment, bookingServiceClient);
+
+        var response = controller.getByBookingId("booking-123", "user-123", "CUSTOMER");
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        verify(bookingServiceClient).getBooking("booking-123", "user-123", "CUSTOMER");
+        verify(getPayment).getByBookingId("booking-123");
+    }
+
+    @Test
+    void doesNotReturnPaymentWhenBookingOwnershipCheckFails() {
+        ProcessWebhookUseCase processWebhook = mock(ProcessWebhookUseCase.class);
+        GetPaymentUseCase getPayment = mock(GetPaymentUseCase.class);
+        BookingServiceClient bookingServiceClient = mock(BookingServiceClient.class);
+        when(bookingServiceClient.getBooking("booking-123", "other-user", "CUSTOMER"))
+                .thenThrow(new ResponseStatusException(HttpStatus.NOT_FOUND));
+        WebhookController controller = controller(processWebhook, getPayment, bookingServiceClient);
+
+        assertThatThrownBy(() -> controller.getByBookingId("booking-123", "other-user", "CUSTOMER"))
+                .isInstanceOf(ResponseStatusException.class);
+
+        verify(getPayment, never()).getByBookingId("booking-123");
+    }
+
     private WebhookController controller(ProcessWebhookUseCase processWebhook) {
+        return controller(processWebhook, mock(GetPaymentUseCase.class), mock(BookingServiceClient.class));
+    }
+
+    private WebhookController controller(
+            ProcessWebhookUseCase processWebhook,
+            GetPaymentUseCase getPayment,
+            BookingServiceClient bookingServiceClient) {
         PaymentWebhookSignatureVerifier verifier = new PaymentWebhookSignatureVerifier(SECRET);
         return new WebhookController(
                 processWebhook,
-                mock(GetPaymentUseCase.class),
+                getPayment,
+                bookingServiceClient,
                 verifier,
                 new ObjectMapper(),
                 Validation.buildDefaultValidatorFactory().getValidator());

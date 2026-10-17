@@ -55,12 +55,18 @@ public class PaymentJpaAdapter implements PaymentRepositoryPort {
         return repository.findByProviderAndTransactionIdForUpdate(provider, transactionId).map(this::mapToDomain);
     }
 
+    @Override
+    public Optional<Payment> findByRefundIdForUpdate(String refundId) {
+        return repository.findByRefundIdForUpdate(refundId).map(this::mapToDomain);
+    }
+
     private PaymentEntity mapToEntity(Payment domain) {
         return PaymentEntity.builder()
                 .id(domain.getId())
                 .bookingId(domain.getBookingId())
                 .transactionId(domain.getTransactionId())
                 .idempotencyKey(domain.getIdempotencyKey())
+                .refundId(domain.getRefundId())
                 .provider(domain.getProvider())
                 .amount(domain.getAmount())
                 .currency(domain.getCurrency())
@@ -77,6 +83,7 @@ public class PaymentJpaAdapter implements PaymentRepositoryPort {
                 .bookingId(entity.getBookingId())
                 .transactionId(entity.getTransactionId())
                 .idempotencyKey(entity.getIdempotencyKey())
+                .refundId(entity.getRefundId())
                 .provider(entity.getProvider())
                 .amount(entity.getAmount())
                 .currency(entity.getCurrency())

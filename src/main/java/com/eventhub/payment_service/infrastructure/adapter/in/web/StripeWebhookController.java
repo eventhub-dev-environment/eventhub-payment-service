@@ -3,6 +3,7 @@ package com.eventhub.payment_service.infrastructure.adapter.in.web;
 import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.model.PaymentStatus;
 import com.eventhub.payment_service.domain.port.in.ProcessWebhookUseCase;
+import com.eventhub.payment_service.domain.port.in.ProcessStripeRefundUpdateUseCase;
 import com.eventhub.payment_service.infrastructure.adapter.in.web.dto.ApiResponse;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -32,6 +33,7 @@ public class StripeWebhookController {
     private static final int MAX_WEBHOOK_BODY_LENGTH = 65_536;
     private final StripeWebhookSignatureVerifier signatureVerifier;
     private final ProcessWebhookUseCase processWebhookUseCase;
+    private final ProcessStripeRefundUpdateUseCase processStripeRefundUpdateUseCase;
     private final ObjectMapper objectMapper;
 
     @PostMapping("/stripe")
@@ -53,6 +55,21 @@ public class StripeWebhookController {
         if (!event.isObject() || eventType == null || eventType.isBlank()
                 || eventId == null || eventId.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El evento de Stripe no tiene el formato esperado");
+        }
+        if ("refund.updated".equals(eventType)) {
+            JsonNode refund = event.path("data").path("object");
+            String refundId = textValue(refund, "id");
+            String refundStatus = textValue(refund, "status");
+            if (!refund.isObject() || !"refund".equals(textValue(refund, "object"))
+                    || refundId == null || refundId.isBlank()
+                    || refundStatus == null || refundStatus.isBlank()) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "El evento de Stripe no contiene un reembolso válido");
+            }
+            processStripeRefundUpdateUseCase.processRefundUpdate(
+                    refundId, eventId, sha256(rawBody), refundStatus);
+            return ResponseEntity.ok(ApiResponse.success(null, "Estado del reembolso de Stripe procesado"));
         }
         PaymentStatus status = switch (eventType) {
             case "payment_intent.succeeded" -> PaymentStatus.APPROVED;

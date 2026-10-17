@@ -3,14 +3,20 @@ package com.eventhub.payment_service.application.usecase;
 import com.eventhub.payment_service.domain.exception.PaymentConflictException;
 import com.eventhub.payment_service.domain.event.PaymentCompletedEvent;
 import com.eventhub.payment_service.domain.event.PaymentFailedEvent;
+import com.eventhub.payment_service.domain.event.PaymentRefundFailedEvent;
+import com.eventhub.payment_service.domain.event.PaymentRefundedEvent;
 import com.eventhub.payment_service.domain.model.Payment;
 import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.model.PaymentStatus;
+import com.eventhub.payment_service.domain.model.StripeRefundResult;
 import com.eventhub.payment_service.domain.model.PaymentWebhookReceipt;
 import com.eventhub.payment_service.domain.port.in.GetPaymentUseCase;
+import com.eventhub.payment_service.domain.port.in.ProcessStripeRefundUpdateUseCase;
 import com.eventhub.payment_service.domain.port.in.ProcessWebhookUseCase;
+import com.eventhub.payment_service.domain.port.in.RefundPaymentUseCase;
 import com.eventhub.payment_service.domain.port.out.PaymentEventPublisherPort;
 import com.eventhub.payment_service.domain.port.out.PaymentRepositoryPort;
+import com.eventhub.payment_service.domain.port.out.StripeRefundPort;
 import com.eventhub.payment_service.domain.port.out.PaymentWebhookReceiptRepositoryPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -22,16 +28,19 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.Locale;
 import java.util.Optional;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase {
+public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase, RefundPaymentUseCase,
+        ProcessStripeRefundUpdateUseCase {
 
     private final PaymentRepositoryPort paymentRepositoryPort;
     private final PaymentEventPublisherPort paymentEventPublisherPort;
     private final PaymentWebhookReceiptRepositoryPort receiptRepositoryPort;
+    private final StripeRefundPort stripeRefundPort;
 
     @Value("${payment.currency:COP}")
     private String configuredCurrency;
@@ -75,6 +84,9 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase 
         if (bookingPayment.isPresent()) {
             ensureSamePaymentIdentity(payment, transactionId, provider, amount, currency);
             if (payment.getStatus() == PaymentStatus.APPROVED
+                    || payment.getStatus() == PaymentStatus.REFUND_PENDING
+                    || payment.getStatus() == PaymentStatus.REFUND_FAILED
+                    || payment.getStatus() == PaymentStatus.REFUNDED
                     || payment.getStatus() == status) {
                 saveReceipt(provider, idempotencyKey, transactionId, bookingId, payloadHash, payment);
                 return payment;
@@ -174,6 +186,126 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase 
                 payloadHash,
                 payment.getId(),
                 LocalDateTime.now()));
+    }
+
+    @Override
+    @Transactional
+    public void refundBooking(String bookingId, String transactionId, BigDecimal amount, String currency) {
+        if (bookingId == null || bookingId.isBlank() || transactionId == null || transactionId.isBlank()
+                || amount == null || currency == null || currency.isBlank()) {
+            throw new IllegalArgumentException("La solicitud de reembolso contiene datos inválidos");
+        }
+        Payment payment = paymentRepositoryPort.findByBookingIdForUpdate(bookingId)
+                .orElseThrow(() -> new PaymentConflictException("No existe un pago para la reserva"));
+        if (!transactionId.equals(payment.getTransactionId())) {
+            publishRefundFailure(payment, transactionId, "La transacción no coincide con el pago aprobado");
+            return;
+        }
+        if (payment.getStatus() == PaymentStatus.REFUNDED
+                || payment.getStatus() == PaymentStatus.REFUND_PENDING
+                || payment.getStatus() == PaymentStatus.REFUND_FAILED) {
+            return;
+        }
+        if (payment.getStatus() != PaymentStatus.APPROVED
+                || payment.getAmount() == null
+                || payment.getAmount().compareTo(amount) != 0
+                || !currency.equals(payment.getCurrency())) {
+            publishRefundFailure(payment, transactionId,
+                    "El pago no coincide con la solicitud de reembolso");
+            return;
+        }
+        if (payment.getProvider() != PaymentProvider.STRIPE) {
+            publishRefundFailure(payment, transactionId,
+                    "El proveedor del pago no admite reembolso automático");
+            return;
+        }
+
+        StripeRefundResult refund = stripeRefundPort.refund(bookingId, transactionId);
+        if (refund == null || refund.refundId() == null || refund.refundId().isBlank()
+                || refund.status() == null || refund.status().isBlank()) {
+            throw new IllegalStateException("Stripe devolvió un resultado de reembolso inválido");
+        }
+        payment.setRefundId(refund.refundId());
+        switch (refund.status().toLowerCase(Locale.ROOT)) {
+            case "succeeded" -> {
+                payment.setStatus(PaymentStatus.REFUNDED);
+                Payment savedPayment = paymentRepositoryPort.save(payment);
+                publishRefunded(savedPayment);
+            }
+            case "pending" -> {
+                payment.setStatus(PaymentStatus.REFUND_PENDING);
+                paymentRepositoryPort.save(payment);
+            }
+            case "failed", "canceled" -> {
+                payment.setStatus(PaymentStatus.REFUND_FAILED);
+                Payment savedPayment = paymentRepositoryPort.save(payment);
+                publishRefundFailure(savedPayment, "Stripe no pudo completar el reembolso");
+            }
+            default -> throw new IllegalStateException("Stripe devolvió un estado de reembolso desconocido");
+        }
+    }
+
+    @Override
+    @Transactional
+    public void processRefundUpdate(String refundId, String eventId, String payloadHash, String status) {
+        if (refundId == null || refundId.isBlank() || eventId == null || eventId.isBlank()
+                || payloadHash == null || payloadHash.isBlank() || status == null || status.isBlank()) {
+            throw new IllegalArgumentException("El evento de reembolso de Stripe contiene datos inválidos");
+        }
+        Optional<PaymentWebhookReceipt> existingReceipt =
+                receiptRepositoryPort.findByProviderAndIdempotencyKey(PaymentProvider.STRIPE, eventId);
+        if (existingReceipt.isPresent()) {
+            if (!existingReceipt.get().payloadHash().equals(payloadHash)) {
+                throw new PaymentConflictException("El evento de Stripe ya fue recibido con otro contenido");
+            }
+            return;
+        }
+
+        Payment payment = paymentRepositoryPort.findByRefundIdForUpdate(refundId)
+                .orElseThrow(() -> new PaymentConflictException("No existe un reembolso asociado al evento de Stripe"));
+        String normalizedStatus = status.toLowerCase(Locale.ROOT);
+        if (payment.getStatus() != PaymentStatus.REFUNDED && payment.getStatus() != PaymentStatus.REFUND_FAILED) {
+            switch (normalizedStatus) {
+                case "succeeded" -> {
+                    payment.setStatus(PaymentStatus.REFUNDED);
+                    Payment savedPayment = paymentRepositoryPort.save(payment);
+                    publishRefunded(savedPayment);
+                }
+                case "failed", "canceled" -> {
+                    payment.setStatus(PaymentStatus.REFUND_FAILED);
+                    Payment savedPayment = paymentRepositoryPort.save(payment);
+                    publishRefundFailure(savedPayment, "Stripe no pudo completar el reembolso");
+                }
+                case "pending" -> paymentRepositoryPort.save(payment);
+                default -> throw new IllegalArgumentException("Estado de reembolso de Stripe no reconocido");
+            }
+        }
+        saveReceipt(PaymentProvider.STRIPE, eventId, payment.getTransactionId(), payment.getBookingId(),
+                payloadHash, payment);
+    }
+
+    private void publishRefunded(Payment payment) {
+        paymentEventPublisherPort.publishPaymentRefunded(PaymentRefundedEvent.builder()
+                .paymentId(payment.getId())
+                .bookingId(payment.getBookingId())
+                .transactionId(payment.getTransactionId())
+                .refundId(payment.getRefundId())
+                .refundedAt(LocalDateTime.now())
+                .build());
+    }
+
+    private void publishRefundFailure(Payment payment, String reason) {
+        publishRefundFailure(payment, payment.getTransactionId(), reason);
+    }
+
+    private void publishRefundFailure(Payment payment, String transactionId, String reason) {
+        paymentEventPublisherPort.publishPaymentRefundFailed(PaymentRefundFailedEvent.builder()
+                .paymentId(payment.getId())
+                .bookingId(payment.getBookingId())
+                .transactionId(transactionId)
+                .reason(reason)
+                .failedAt(LocalDateTime.now())
+                .build());
     }
 
     @Override

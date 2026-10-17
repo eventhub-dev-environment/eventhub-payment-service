@@ -5,6 +5,7 @@ import com.eventhub.payment_service.domain.port.in.GetPaymentUseCase;
 import com.eventhub.payment_service.domain.port.in.ProcessWebhookUseCase;
 import com.eventhub.payment_service.infrastructure.adapter.in.web.dto.ApiResponse;
 import com.eventhub.payment_service.infrastructure.adapter.in.web.dto.ProcessWebhookRequest;
+import com.eventhub.payment_service.infrastructure.adapter.out.booking.BookingServiceClient;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Validator;
@@ -24,6 +25,7 @@ public class WebhookController {
     private static final int MAX_WEBHOOK_BODY_LENGTH = 65_536;
     private final ProcessWebhookUseCase processWebhookUseCase;
     private final GetPaymentUseCase getPaymentUseCase;
+    private final BookingServiceClient bookingServiceClient;
     private final PaymentWebhookSignatureVerifier signatureVerifier;
     private final ObjectMapper objectMapper;
     private final Validator validator;
@@ -65,7 +67,11 @@ public class WebhookController {
     }
 
     @GetMapping("/booking/{bookingId}")
-    public ResponseEntity<ApiResponse<Payment>> getByBookingId(@PathVariable String bookingId) {
+    public ResponseEntity<ApiResponse<Payment>> getByBookingId(
+            @PathVariable String bookingId,
+            @RequestHeader("X-User-Id") String userId,
+            @RequestHeader("X-User-Roles") String userRoles) {
+        bookingServiceClient.getBooking(bookingId, userId, userRoles);
         return getPaymentUseCase.getByBookingId(bookingId)
                 .map(payment -> ResponseEntity.ok(ApiResponse.success(payment, "Pago encontrado")))
                 .orElse(ResponseEntity.notFound().build());

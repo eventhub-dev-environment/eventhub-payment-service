@@ -3,6 +3,7 @@ package com.eventhub.payment_service.infrastructure.adapter.in.web;
 import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.model.PaymentStatus;
 import com.eventhub.payment_service.domain.port.in.ProcessWebhookUseCase;
+import com.eventhub.payment_service.domain.port.in.ProcessStripeRefundUpdateUseCase;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -85,6 +86,22 @@ class StripeWebhookControllerTest {
     }
 
     @Test
+    void mapsVerifiedRefundUpdateToIdempotentRefundStateUpdate() throws Exception {
+        ProcessWebhookUseCase processWebhook = mock(ProcessWebhookUseCase.class);
+        ProcessStripeRefundUpdateUseCase refundUpdate = mock(ProcessStripeRefundUpdateUseCase.class);
+        String body = """
+                {"id":"evt_refund","type":"refund.updated","data":{"object":{
+                  "id":"re_123","object":"refund","status":"succeeded"}}}
+                """;
+
+        controller(processWebhook, refundUpdate).receiveStripeWebhook(body, signature(body));
+
+        verify(refundUpdate).processRefundUpdate(eq("re_123"), eq("evt_refund"), any(String.class), eq("succeeded"));
+        verify(processWebhook, never()).processWebhook(
+                any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void rejectsMalformedSignedEvent() throws Exception {
         String body = "[]";
 
@@ -96,9 +113,16 @@ class StripeWebhookControllerTest {
     }
 
     private StripeWebhookController controller(ProcessWebhookUseCase processWebhook) {
+        return controller(processWebhook, mock(ProcessStripeRefundUpdateUseCase.class));
+    }
+
+    private StripeWebhookController controller(
+            ProcessWebhookUseCase processWebhook,
+            ProcessStripeRefundUpdateUseCase refundUpdate) {
         return new StripeWebhookController(
                 new StripeWebhookSignatureVerifier(SECRET),
                 processWebhook,
+                refundUpdate,
                 new ObjectMapper());
     }
 

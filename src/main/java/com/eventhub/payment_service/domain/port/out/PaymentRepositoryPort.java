@@ -12,4 +12,5 @@ public interface PaymentRepositoryPort {
     Optional<Payment> findByTransactionId(String transactionId);
     Optional<Payment> findByBookingIdForUpdate(String bookingId);
     Optional<Payment> findByProviderAndTransactionIdForUpdate(PaymentProvider provider, String transactionId);
+    Optional<Payment> findByRefundIdForUpdate(String refundId);
 }

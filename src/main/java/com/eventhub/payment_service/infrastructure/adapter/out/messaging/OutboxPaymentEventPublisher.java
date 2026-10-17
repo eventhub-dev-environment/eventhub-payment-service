@@ -2,6 +2,8 @@ package com.eventhub.payment_service.infrastructure.adapter.out.messaging;
 
 import com.eventhub.payment_service.domain.event.PaymentCompletedEvent;
 import com.eventhub.payment_service.domain.event.PaymentFailedEvent;
+import com.eventhub.payment_service.domain.event.PaymentRefundFailedEvent;
+import com.eventhub.payment_service.domain.event.PaymentRefundedEvent;
 import com.eventhub.payment_service.domain.model.OutboxEvent;
 import com.eventhub.payment_service.domain.model.OutboxStatus;
 import com.eventhub.payment_service.domain.port.out.OutboxEventRepositoryPort;
@@ -31,6 +33,18 @@ public class OutboxPaymentEventPublisher implements PaymentEventPublisherPort {
     public void publishPaymentFailed(PaymentFailedEvent event) {
         save("Payment", event.getPaymentId(), event.getClass().getSimpleName(),
                 RabbitMQConfig.PAYMENT_FAILED_KEY, event);
+    }
+
+    @Override
+    public void publishPaymentRefunded(PaymentRefundedEvent event) {
+        save("Payment", event.getPaymentId(), event.getClass().getSimpleName(),
+                RabbitMQConfig.PAYMENT_REFUNDED_KEY, event);
+    }
+
+    @Override
+    public void publishPaymentRefundFailed(PaymentRefundFailedEvent event) {
+        save("Payment", event.getPaymentId(), event.getClass().getSimpleName(),
+                RabbitMQConfig.PAYMENT_REFUND_FAILED_KEY, event);
     }
 
     private void save(String aggregateType, String aggregateId, String eventType, String routingKey, Object payload) {

@@ -17,6 +17,10 @@ public interface SpringDataJpaPaymentRepository extends JpaRepository<PaymentEnt
     Optional<PaymentEntity> findByTransactionId(String transactionId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT payment FROM PaymentEntity payment WHERE payment.refundId = :refundId")
+    Optional<PaymentEntity> findByRefundIdForUpdate(@Param("refundId") String refundId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT payment FROM PaymentEntity payment WHERE payment.bookingId = :bookingId")
     Optional<PaymentEntity> findByBookingIdForUpdate(@Param("bookingId") String bookingId);
 
