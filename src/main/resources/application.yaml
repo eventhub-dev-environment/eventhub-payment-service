@@ -6,6 +6,9 @@ spring:
     name: payment-service
   profiles:
     active: dev
+  http:
+    converters:
+      preferred-json-mapper: jackson2
   flyway:
     baseline-on-migrate: false
     baseline-version: 1
