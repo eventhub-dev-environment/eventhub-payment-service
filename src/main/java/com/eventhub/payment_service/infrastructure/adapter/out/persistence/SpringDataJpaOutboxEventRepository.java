@@ -22,4 +22,6 @@ public interface SpringDataJpaOutboxEventRepository extends JpaRepository<Outbox
             ORDER BY event.createdAt
             """)
     List<OutboxEventEntity> findByStatusForUpdate(@Param("status") OutboxStatus status, Pageable pageable);
+
+    long countByStatus(OutboxStatus status);
 }
