@@ -50,7 +50,14 @@ public class OutboxEventRelay {
                 });
                 CorrelationData correlationData = new CorrelationData(event.id());
                 rabbitTemplate.convertAndSend(
-                        event.exchange(), event.routingKey(), payload, correlationData);
+                        event.exchange(),
+                        event.routingKey(),
+                        payload,
+                        message -> {
+                            message.getMessageProperties().setMessageId(event.id());
+                            return message;
+                        },
+                        correlationData);
                 CorrelationData.Confirm confirm = correlationData.getFuture()
                         .get(confirmTimeoutMs, TimeUnit.MILLISECONDS);
                 if (!confirm.ack() || correlationData.getReturned() != null) {
