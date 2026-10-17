@@ -2,6 +2,8 @@ package com.eventhub.payment_service.application.usecase;
 
 import com.eventhub.payment_service.domain.exception.PaymentConflictException;
 import com.eventhub.payment_service.domain.event.PaymentCompletedEvent;
+import com.eventhub.payment_service.domain.model.CheckoutAttempt;
+import com.eventhub.payment_service.domain.model.CheckoutAttemptStatus;
 import com.eventhub.payment_service.domain.model.Payment;
 import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.model.PaymentStatus;
@@ -10,9 +12,9 @@ import com.eventhub.payment_service.domain.model.StripeRefundResult;
 import com.eventhub.payment_service.domain.port.out.PaymentEventPublisherPort;
 import com.eventhub.payment_service.domain.port.out.PaymentRepositoryPort;
 import com.eventhub.payment_service.domain.port.out.StripeRefundPort;
+import com.eventhub.payment_service.domain.port.out.CheckoutAttemptRepositoryPort;
 import com.eventhub.payment_service.domain.port.out.PaymentWebhookReceiptRepositoryPort;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -88,7 +90,7 @@ class PaymentServiceTest {
     }
 
     @Test
-    void refusesCurrencyThatDiffersFromConfiguredCurrency() {
+    void rejectsMalformedCurrencyCode() {
         PaymentService service = service(
                 mock(PaymentRepositoryPort.class),
                 mock(PaymentWebhookReceiptRepositoryPort.class),
@@ -96,8 +98,29 @@ class PaymentServiceTest {
 
         assertThatThrownBy(() -> service.processWebhook(
                 "booking-123", "transaction-123", "event-123", PaymentProvider.WOMPI,
-                new BigDecimal("42.50"), "USD", PaymentStatus.APPROVED, "payload-hash"))
+                new BigDecimal("42.50"), "US", PaymentStatus.APPROVED, "payload-hash"))
                 .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+    }
+
+    @Test
+    void forwardsAuthenticPaymentWithUnexpectedCurrencyForBookingManualReview() {
+        PaymentRepositoryPort paymentRepository = mock(PaymentRepositoryPort.class);
+        PaymentWebhookReceiptRepositoryPort receiptRepository = mock(PaymentWebhookReceiptRepositoryPort.class);
+        PaymentEventPublisherPort eventPublisher = mock(PaymentEventPublisherPort.class);
+        when(receiptRepository.findByProviderAndIdempotencyKey(PaymentProvider.STRIPE, "evt-usd"))
+                .thenReturn(Optional.empty());
+        when(paymentRepository.findByProviderAndTransactionIdForUpdate(PaymentProvider.STRIPE, "pi-usd"))
+                .thenReturn(Optional.empty());
+        when(paymentRepository.findByBookingIdForUpdate("booking-123")).thenReturn(Optional.empty());
+        when(paymentRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        PaymentService service = service(paymentRepository, receiptRepository, eventPublisher);
+
+        Payment payment = service.processWebhook(
+                "booking-123", "pi-usd", "evt-usd", PaymentProvider.STRIPE,
+                new BigDecimal("42.50"), "USD", PaymentStatus.APPROVED, "payload-hash");
+
+        assertThat(payment.getCurrency()).isEqualTo("USD");
+        verify(eventPublisher).publishPaymentCompleted(any(PaymentCompletedEvent.class));
     }
 
     @Test
@@ -107,7 +130,8 @@ class PaymentServiceTest {
         PaymentEventPublisherPort eventPublisher = mock(PaymentEventPublisherPort.class);
         StripeRefundPort stripeRefundPort = mock(StripeRefundPort.class);
         Payment payment = approvedStripePayment();
-        when(paymentRepository.findByBookingIdForUpdate("booking-123")).thenReturn(Optional.of(payment));
+        when(paymentRepository.findByProviderAndTransactionIdForUpdate(PaymentProvider.STRIPE, "pi-123"))
+                .thenReturn(Optional.of(payment));
         when(stripeRefundPort.refund("booking-123", "pi-123"))
                 .thenReturn(new StripeRefundResult("re-123", "succeeded"));
         when(paymentRepository.save(payment)).thenReturn(payment);
@@ -128,7 +152,8 @@ class PaymentServiceTest {
         PaymentEventPublisherPort eventPublisher = mock(PaymentEventPublisherPort.class);
         StripeRefundPort stripeRefundPort = mock(StripeRefundPort.class);
         Payment payment = approvedStripePayment();
-        when(paymentRepository.findByBookingIdForUpdate("booking-123")).thenReturn(Optional.of(payment));
+        when(paymentRepository.findByProviderAndTransactionIdForUpdate(PaymentProvider.STRIPE, "pi-123"))
+                .thenReturn(Optional.of(payment));
         when(stripeRefundPort.refund("booking-123", "pi-123"))
                 .thenReturn(new StripeRefundResult("re-123", "pending"));
         when(paymentRepository.findByRefundIdForUpdate("re-123")).thenReturn(Optional.of(payment));
@@ -170,6 +195,66 @@ class PaymentServiceTest {
         verify(eventPublisher, never()).publishPaymentCompleted(any());
     }
 
+    @Test
+    void storesIndependentPaymentRecordsForSequentialCheckoutAttempts() {
+        PaymentRepositoryPort paymentRepository = mock(PaymentRepositoryPort.class);
+        PaymentWebhookReceiptRepositoryPort receiptRepository = mock(PaymentWebhookReceiptRepositoryPort.class);
+        PaymentEventPublisherPort eventPublisher = mock(PaymentEventPublisherPort.class);
+        CheckoutAttemptRepositoryPort attemptRepository = mock(CheckoutAttemptRepositoryPort.class);
+        CheckoutAttempt firstAttempt = checkoutAttempt("attempt-1");
+        CheckoutAttempt secondAttempt = checkoutAttempt("attempt-2");
+        CheckoutAttempt anotherActiveAttempt = checkoutAttempt("attempt-late");
+        when(attemptRepository.findByIdForUpdate("attempt-1")).thenReturn(Optional.of(firstAttempt));
+        when(attemptRepository.findByIdForUpdate("attempt-2")).thenReturn(Optional.of(secondAttempt));
+        when(attemptRepository.findActiveByBookingIdForUpdate("booking-123"))
+                .thenReturn(Optional.of(anotherActiveAttempt));
+        when(paymentRepository.findByProviderAndTransactionIdForUpdate(PaymentProvider.STRIPE, "pi-failed"))
+                .thenReturn(Optional.empty());
+        when(paymentRepository.findByProviderAndTransactionIdForUpdate(PaymentProvider.STRIPE, "pi-approved"))
+                .thenReturn(Optional.empty());
+        when(paymentRepository.findByCheckoutAttemptIdForUpdate("attempt-1")).thenReturn(Optional.empty());
+        when(paymentRepository.findByCheckoutAttemptIdForUpdate("attempt-2")).thenReturn(Optional.empty());
+        when(receiptRepository.findByProviderAndIdempotencyKey(PaymentProvider.STRIPE, "evt-failed"))
+                .thenReturn(Optional.empty());
+        when(receiptRepository.findByProviderAndIdempotencyKey(PaymentProvider.STRIPE, "evt-approved"))
+                .thenReturn(Optional.empty());
+        when(paymentRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        PaymentService service = service(
+                paymentRepository, receiptRepository, eventPublisher, mock(StripeRefundPort.class), attemptRepository);
+
+        Payment failedPayment = service.processWebhook(
+                "booking-123", "attempt-1", "pi-failed", "evt-failed", PaymentProvider.STRIPE,
+                new BigDecimal("42.50"), "COP", PaymentStatus.REJECTED, "failed-hash");
+        Payment approvedPayment = service.processWebhook(
+                "booking-123", "attempt-2", "pi-approved", "evt-approved", PaymentProvider.STRIPE,
+                new BigDecimal("42.50"), "COP", PaymentStatus.APPROVED, "approved-hash");
+
+        assertThat(failedPayment.getCheckoutAttemptId()).isEqualTo("attempt-1");
+        assertThat(approvedPayment.getCheckoutAttemptId()).isEqualTo("attempt-2");
+        assertThat(firstAttempt.getStatus()).isEqualTo(CheckoutAttemptStatus.CLOSING);
+        assertThat(secondAttempt.getStatus()).isEqualTo(CheckoutAttemptStatus.COMPLETED);
+        assertThat(anotherActiveAttempt.getStatus()).isEqualTo(CheckoutAttemptStatus.CLOSING);
+        verify(paymentRepository, org.mockito.Mockito.times(2)).save(any(Payment.class));
+        verify(attemptRepository).save(anotherActiveAttempt);
+        verify(eventPublisher).publishPaymentFailed(any());
+        verify(eventPublisher).publishPaymentCompleted(any());
+    }
+
+    private CheckoutAttempt checkoutAttempt(String id) {
+        return CheckoutAttempt.builder()
+                .id(id)
+                .bookingId("booking-123")
+                .status(CheckoutAttemptStatus.OPEN)
+                .amountMinor(4250L)
+                .currency("COP")
+                .successUrl("https://example.test/success")
+                .cancelUrl("https://example.test/cancel")
+                .bookingExpiresAt(LocalDateTime.now().plusMinutes(5))
+                .createdAt(LocalDateTime.now())
+                .updatedAt(LocalDateTime.now())
+                .build();
+    }
+
     private Payment approvedStripePayment() {
         return Payment.builder()
                 .id("payment-123")
@@ -186,10 +271,8 @@ class PaymentServiceTest {
             PaymentRepositoryPort paymentRepository,
             PaymentWebhookReceiptRepositoryPort receiptRepository,
             PaymentEventPublisherPort eventPublisher) {
-        PaymentService service = new PaymentService(
-                paymentRepository, eventPublisher, receiptRepository, mock(StripeRefundPort.class));
-        ReflectionTestUtils.setField(service, "configuredCurrency", "COP");
-        return service;
+        return service(paymentRepository, receiptRepository, eventPublisher,
+                mock(StripeRefundPort.class), mock(CheckoutAttemptRepositoryPort.class));
     }
 
     private PaymentService service(
@@ -197,9 +280,18 @@ class PaymentServiceTest {
             PaymentWebhookReceiptRepositoryPort receiptRepository,
             PaymentEventPublisherPort eventPublisher,
             StripeRefundPort stripeRefundPort) {
+        return service(paymentRepository, receiptRepository, eventPublisher,
+                stripeRefundPort, mock(CheckoutAttemptRepositoryPort.class));
+    }
+
+    private PaymentService service(
+            PaymentRepositoryPort paymentRepository,
+            PaymentWebhookReceiptRepositoryPort receiptRepository,
+            PaymentEventPublisherPort eventPublisher,
+            StripeRefundPort stripeRefundPort,
+            CheckoutAttemptRepositoryPort attemptRepository) {
         PaymentService service = new PaymentService(
-                paymentRepository, eventPublisher, receiptRepository, stripeRefundPort);
-        ReflectionTestUtils.setField(service, "configuredCurrency", "COP");
+                paymentRepository, eventPublisher, receiptRepository, stripeRefundPort, attemptRepository);
         return service;
     }
 }

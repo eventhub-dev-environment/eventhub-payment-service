@@ -10,7 +10,7 @@ import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "payments", uniqueConstraints = {
-        @UniqueConstraint(name = "uk_payment_booking", columnNames = "booking_id"),
+        @UniqueConstraint(name = "uk_payment_checkout_attempt", columnNames = "checkout_attempt_id"),
         @UniqueConstraint(name = "uk_payment_idempotency", columnNames = {"provider", "idempotency_key"}),
         @UniqueConstraint(name = "uk_payment_provider_transaction", columnNames = {"provider", "transaction_id"}),
         @UniqueConstraint(name = "uk_payment_refund_id", columnNames = "refund_id")
@@ -28,6 +28,9 @@ public class PaymentEntity {
 
     @Column(nullable = false)
     private String bookingId;
+
+    @Column(name = "checkout_attempt_id", length = 255)
+    private String checkoutAttemptId;
 
     @Column(length = 200)
     private String transactionId;

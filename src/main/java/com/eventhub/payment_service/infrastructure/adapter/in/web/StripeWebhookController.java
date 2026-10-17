@@ -4,6 +4,7 @@ import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.model.PaymentStatus;
 import com.eventhub.payment_service.domain.port.in.ProcessWebhookUseCase;
 import com.eventhub.payment_service.domain.port.in.ProcessStripeRefundUpdateUseCase;
+import com.eventhub.payment_service.domain.port.in.ProcessStripeCheckoutSessionUpdateUseCase;
 import com.eventhub.payment_service.infrastructure.adapter.in.web.dto.ApiResponse;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -34,6 +35,7 @@ public class StripeWebhookController {
     private final StripeWebhookSignatureVerifier signatureVerifier;
     private final ProcessWebhookUseCase processWebhookUseCase;
     private final ProcessStripeRefundUpdateUseCase processStripeRefundUpdateUseCase;
+    private final ProcessStripeCheckoutSessionUpdateUseCase processStripeCheckoutSessionUpdateUseCase;
     private final ObjectMapper objectMapper;
 
     @PostMapping("/stripe")
@@ -71,6 +73,49 @@ public class StripeWebhookController {
                     refundId, eventId, sha256(rawBody), refundStatus);
             return ResponseEntity.ok(ApiResponse.success(null, "Estado del reembolso de Stripe procesado"));
         }
+        if ("checkout.session.completed".equals(eventType)
+                || "checkout.session.expired".equals(eventType)
+                || "checkout.session.async_payment_succeeded".equals(eventType)
+                || "checkout.session.async_payment_failed".equals(eventType)) {
+            JsonNode session = event.path("data").path("object");
+            String sessionId = textValue(session, "id");
+            String attemptId = textValue(session.path("metadata"), "attemptId");
+            String bookingId = textValue(session.path("metadata"), "bookingId");
+            String paymentStatus = textValue(session, "payment_status");
+            if (!session.isObject() || !"checkout.session".equals(textValue(session, "object"))
+                    || sessionId == null || sessionId.isBlank()) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "El evento de Stripe no contiene una Checkout Session válida");
+            }
+            if ("checkout.session.completed".equals(eventType)
+                    && !"paid".equals(paymentStatus) && !"unpaid".equals(paymentStatus)) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "El evento de Stripe no contiene el estado del pago de Checkout");
+            }
+            if ("checkout.session.async_payment_succeeded".equals(eventType)
+                    && !"paid".equals(paymentStatus)) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "El evento de Stripe no confirma el pago de Checkout");
+            }
+            if (attemptId != null && !attemptId.isBlank()
+                    && (bookingId == null || bookingId.isBlank())) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "El evento de Stripe no contiene la reserva del intento de Checkout");
+            }
+            boolean paymentSucceeded = ("checkout.session.completed".equals(eventType)
+                    || "checkout.session.async_payment_succeeded".equals(eventType))
+                    && "paid".equals(paymentStatus);
+            if (paymentSucceeded) {
+                processCheckoutSessionPayment(eventId, session, bookingId, attemptId, rawBody);
+            }
+            processStripeCheckoutSessionUpdateUseCase.processCheckoutSessionUpdate(
+                    sessionId, attemptId, bookingId, eventType, paymentStatus);
+            return ResponseEntity.ok(ApiResponse.success(null, "Estado de Checkout Session procesado"));
+        }
         PaymentStatus status = switch (eventType) {
             case "payment_intent.succeeded" -> PaymentStatus.APPROVED;
             case "payment_intent.payment_failed" -> PaymentStatus.REJECTED;
@@ -89,6 +134,7 @@ public class StripeWebhookController {
         }
 
         String bookingId = textValue(paymentIntent.path("metadata"), "bookingId");
+        String attemptId = textValue(paymentIntent.path("metadata"), "attemptId");
         String transactionId = textValue(paymentIntent, "id");
         String currency = textValue(paymentIntent, "currency");
         JsonNode amountNode = paymentIntent.path(
@@ -111,6 +157,7 @@ public class StripeWebhookController {
 
         processWebhookUseCase.processWebhook(
                 bookingId,
+                attemptId,
                 transactionId,
                 eventId,
                 PaymentProvider.STRIPE,
@@ -119,6 +166,38 @@ public class StripeWebhookController {
                 status,
                 sha256(rawBody));
         return ResponseEntity.ok(ApiResponse.success(null, "Evento de Stripe procesado"));
+    }
+
+    private void processCheckoutSessionPayment(
+            String eventId, JsonNode session, String bookingId, String attemptId, String rawBody) {
+        String transactionId = paymentIntentId(session.path("payment_intent"));
+        String currency = textValue(session, "currency");
+        JsonNode amountNode = session.path("amount_total");
+        if (bookingId == null || bookingId.isBlank()
+                || transactionId == null || transactionId.isBlank()
+                || currency == null || currency.isBlank()
+                || !amountNode.isIntegralNumber() || amountNode.longValue() <= 0) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "La Checkout Session pagada no contiene los datos requeridos del pago");
+        }
+        processWebhookUseCase.processWebhook(
+                bookingId,
+                attemptId,
+                transactionId,
+                eventId,
+                PaymentProvider.STRIPE,
+                BigDecimal.valueOf(amountNode.longValue()),
+                currency.toUpperCase(Locale.ROOT),
+                PaymentStatus.APPROVED,
+                sha256(rawBody));
+    }
+
+    private String paymentIntentId(JsonNode paymentIntent) {
+        if (paymentIntent.isTextual()) {
+            return paymentIntent.textValue();
+        }
+        return textValue(paymentIntent, "id");
     }
 
     private String textValue(JsonNode object, String fieldName) {

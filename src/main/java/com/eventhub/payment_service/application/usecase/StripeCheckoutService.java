@@ -3,14 +3,14 @@ package com.eventhub.payment_service.application.usecase;
 import com.eventhub.payment_service.infrastructure.adapter.in.web.dto.CheckoutSessionResponse;
 import com.eventhub.payment_service.infrastructure.adapter.out.booking.BookingServiceClient;
 import com.eventhub.payment_service.infrastructure.adapter.out.booking.BookingServiceClient.BookingDetails;
-import com.stripe.StripeClient;
-import com.stripe.exception.StripeException;
-import com.stripe.model.checkout.Session;
-import com.stripe.net.RequestOptions;
-import com.stripe.param.checkout.SessionCreateParams;
+import com.eventhub.payment_service.domain.exception.StripeCheckoutException;
+import com.eventhub.payment_service.domain.model.CheckoutAttempt;
+import com.eventhub.payment_service.domain.model.CheckoutAttemptStatus;
+import com.eventhub.payment_service.domain.model.StripeCheckoutSession;
+import com.eventhub.payment_service.domain.port.out.StripeCheckoutPort;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -18,12 +18,13 @@ import org.springframework.web.server.ResponseStatusException;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
-@Slf4j
 @Service
 @RequiredArgsConstructor
 public class StripeCheckoutService implements CreateStripeCheckoutSessionUseCase {
 
     private final BookingServiceClient bookingServiceClient;
+    private final CheckoutAttemptService checkoutAttemptService;
+    private final StripeCheckoutPort stripeCheckoutPort;
 
     @Value("${payment.currency:COP}")
     private String currency;
@@ -43,47 +44,43 @@ public class StripeCheckoutService implements CreateStripeCheckoutSessionUseCase
         BookingDetails booking = bookingServiceClient.getBooking(bookingId, userId, userRoles);
         validateBooking(booking, userId);
         long amount = toStripeMinorUnits(booking.totalPrice());
-
-        SessionCreateParams params = SessionCreateParams.builder()
-                .setMode(SessionCreateParams.Mode.PAYMENT)
-                .setSuccessUrl(successUrl)
-                .setCancelUrl(cancelUrl)
-                .setClientReferenceId(bookingId)
-                .putMetadata("bookingId", bookingId)
-                .setPaymentIntentData(SessionCreateParams.PaymentIntentData.builder()
-                        .putMetadata("bookingId", bookingId)
-                        .build())
-                .addLineItem(SessionCreateParams.LineItem.builder()
-                        .setQuantity(1L)
-                        .setPriceData(SessionCreateParams.LineItem.PriceData.builder()
-                                .setCurrency(currency.toLowerCase(java.util.Locale.ROOT))
-                                .setUnitAmount(amount)
-                                .setProductData(SessionCreateParams.LineItem.PriceData.ProductData.builder()
-                                        .setName("EventHub booking " + bookingId)
-                                        .build())
-                                .build())
-                        .build())
-                .build();
-
+        CheckoutAttempt attempt;
         try {
-            Session session = new StripeClient(stripeSecretKey).v1().checkout().sessions().create(
-                    params,
-                    RequestOptions.builder()
-                            .setIdempotencyKey("eventhub-booking-" + bookingId)
-                            .build());
-            if (session.getUrl() == null || session.getUrl().isBlank()) {
-                throw new ResponseStatusException(
-                        HttpStatus.BAD_GATEWAY,
-                        "Stripe no devolvió una URL de pago");
-            }
-            return new CheckoutSessionResponse(session.getId(), session.getUrl());
-        } catch (StripeException exception) {
-            log.error("Stripe no pudo crear Checkout Session para bookingId={}, requestId={}",
-                    bookingId, exception.getRequestId());
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_GATEWAY,
-                    "No se pudo iniciar el pago con Stripe");
+            attempt = checkoutAttemptService.acquire(
+                    bookingId,
+                    amount,
+                    currency,
+                    successUrl,
+                    cancelUrl,
+                    booking.expiresAt());
+        } catch (DataIntegrityViolationException exception) {
+            attempt = checkoutAttemptService.findActive(bookingId)
+                    .orElseThrow(() -> exception);
         }
+        if (attempt.getStatus() == CheckoutAttemptStatus.OPEN
+                && attempt.getCheckoutUrl() != null && !attempt.getCheckoutUrl().isBlank()) {
+            return new CheckoutSessionResponse(attempt.getStripeSessionId(), attempt.getCheckoutUrl());
+        }
+        if (attempt.getStatus() != CheckoutAttemptStatus.CREATING) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    attempt.getStatus() == CheckoutAttemptStatus.COMPLETED
+                            ? "La reserva ya tiene un pago completado"
+                            : "El intento de pago anterior todavía se está cerrando");
+        }
+        StripeCheckoutSession session;
+        try {
+            session = stripeCheckoutPort.createSession(attempt);
+        } catch (StripeCheckoutException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY, "No se pudo iniciar el pago con Stripe", exception);
+        }
+        if (session.url() == null || session.url().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Stripe no devolvió una URL de pago");
+        }
+        CheckoutAttempt savedAttempt =
+                checkoutAttemptService.markSessionOpen(attempt.getId(), session.id(), session.url());
+        return new CheckoutSessionResponse(savedAttempt.getStripeSessionId(), savedAttempt.getCheckoutUrl());
     }
 
     private void ensureStripeConfiguration() {

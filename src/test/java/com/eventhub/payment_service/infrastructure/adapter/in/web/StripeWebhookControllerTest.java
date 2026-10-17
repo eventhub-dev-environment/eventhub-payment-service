@@ -4,6 +4,7 @@ import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.model.PaymentStatus;
 import com.eventhub.payment_service.domain.port.in.ProcessWebhookUseCase;
 import com.eventhub.payment_service.domain.port.in.ProcessStripeRefundUpdateUseCase;
+import com.eventhub.payment_service.domain.port.in.ProcessStripeCheckoutSessionUpdateUseCase;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -35,13 +36,14 @@ class StripeWebhookControllerTest {
         String body = """
                 {"id":"evt_123","type":"payment_intent.succeeded","data":{"object":{
                   "id":"pi_123","object":"payment_intent","amount_received":125000,
-                  "currency":"cop","metadata":{"bookingId":"booking-123"}}}}
+                  "currency":"cop","metadata":{"bookingId":"booking-123","attemptId":"attempt-123"}}}}
                 """;
 
         controller(processWebhook).receiveStripeWebhook(body, signature(body));
 
         verify(processWebhook).processWebhook(
                 eq("booking-123"),
+                eq("attempt-123"),
                 eq("pi_123"),
                 eq("evt_123"),
                 eq(PaymentProvider.STRIPE),
@@ -57,13 +59,14 @@ class StripeWebhookControllerTest {
         String body = """
                 {"id":"evt_456","type":"payment_intent.payment_failed","data":{"object":{
                   "id":"pi_456","object":"payment_intent","amount":125000,
-                  "currency":"cop","metadata":{"bookingId":"booking-456"}}}}
+                  "currency":"cop","metadata":{"bookingId":"booking-456","attemptId":"attempt-456"}}}}
                 """;
 
         controller(processWebhook).receiveStripeWebhook(body, signature(body));
 
         verify(processWebhook).processWebhook(
                 eq("booking-456"),
+                eq("attempt-456"),
                 eq("pi_456"),
                 eq("evt_456"),
                 eq(PaymentProvider.STRIPE),
@@ -102,6 +105,83 @@ class StripeWebhookControllerTest {
     }
 
     @Test
+    void mapsVerifiedExpiredCheckoutSessionToAttemptClosure() throws Exception {
+        ProcessWebhookUseCase processWebhook = mock(ProcessWebhookUseCase.class);
+        ProcessStripeCheckoutSessionUpdateUseCase sessionUpdate =
+                mock(ProcessStripeCheckoutSessionUpdateUseCase.class);
+        String body = """
+                {"id":"evt_expired","type":"checkout.session.expired","data":{"object":{
+                  "id":"cs_123","object":"checkout.session","metadata":{
+                    "bookingId":"booking-123","attemptId":"attempt-123"}}}}
+                """;
+
+        controller(processWebhook, mock(ProcessStripeRefundUpdateUseCase.class), sessionUpdate)
+                .receiveStripeWebhook(body, signature(body));
+
+        verify(sessionUpdate).processCheckoutSessionUpdate(
+                "cs_123", "attempt-123", "booking-123", "checkout.session.expired", null);
+    }
+
+    @Test
+    void mapsVerifiedCompletedCheckoutSessionToAttemptUpdate() throws Exception {
+        ProcessWebhookUseCase processWebhook = mock(ProcessWebhookUseCase.class);
+        ProcessStripeCheckoutSessionUpdateUseCase sessionUpdate =
+                mock(ProcessStripeCheckoutSessionUpdateUseCase.class);
+        String body = """
+                {"id":"evt_completed","type":"checkout.session.completed","data":{"object":{
+                  "id":"cs_456","object":"checkout.session","payment_status":"paid",
+                  "payment_intent":"pi_456","amount_total":125000,"currency":"cop",
+                  "metadata":{"bookingId":"booking-456","attemptId":"attempt-456"}}}}
+                """;
+
+        controller(processWebhook, mock(ProcessStripeRefundUpdateUseCase.class), sessionUpdate)
+                .receiveStripeWebhook(body, signature(body));
+
+        verify(sessionUpdate).processCheckoutSessionUpdate(
+                "cs_456", "attempt-456", "booking-456", "checkout.session.completed", "paid");
+        verify(processWebhook).processWebhook(
+                eq("booking-456"),
+                eq("attempt-456"),
+                eq("pi_456"),
+                eq("evt_completed"),
+                eq(PaymentProvider.STRIPE),
+                eq(new BigDecimal("125000")),
+                eq("COP"),
+                eq(PaymentStatus.APPROVED),
+                any(String.class));
+    }
+
+    @Test
+    void mapsVerifiedAsyncCheckoutSuccessToAnApprovedPayment() throws Exception {
+        ProcessWebhookUseCase processWebhook = mock(ProcessWebhookUseCase.class);
+        ProcessStripeCheckoutSessionUpdateUseCase sessionUpdate =
+                mock(ProcessStripeCheckoutSessionUpdateUseCase.class);
+        String body = """
+                {"id":"evt_async_paid","type":"checkout.session.async_payment_succeeded","data":{"object":{
+                  "id":"cs_async","object":"checkout.session","payment_status":"paid",
+                  "payment_intent":"pi_async","amount_total":4250,"currency":"cop",
+                  "metadata":{"bookingId":"booking-async","attemptId":"attempt-async"}}}}
+                """;
+
+        controller(processWebhook, mock(ProcessStripeRefundUpdateUseCase.class), sessionUpdate)
+                .receiveStripeWebhook(body, signature(body));
+
+        verify(processWebhook).processWebhook(
+                eq("booking-async"),
+                eq("attempt-async"),
+                eq("pi_async"),
+                eq("evt_async_paid"),
+                eq(PaymentProvider.STRIPE),
+                eq(new BigDecimal("4250")),
+                eq("COP"),
+                eq(PaymentStatus.APPROVED),
+                any(String.class));
+        verify(sessionUpdate).processCheckoutSessionUpdate(
+                "cs_async", "attempt-async", "booking-async",
+                "checkout.session.async_payment_succeeded", "paid");
+    }
+
+    @Test
     void rejectsMalformedSignedEvent() throws Exception {
         String body = "[]";
 
@@ -113,16 +193,25 @@ class StripeWebhookControllerTest {
     }
 
     private StripeWebhookController controller(ProcessWebhookUseCase processWebhook) {
-        return controller(processWebhook, mock(ProcessStripeRefundUpdateUseCase.class));
+        return controller(processWebhook, mock(ProcessStripeRefundUpdateUseCase.class),
+                mock(ProcessStripeCheckoutSessionUpdateUseCase.class));
     }
 
     private StripeWebhookController controller(
             ProcessWebhookUseCase processWebhook,
             ProcessStripeRefundUpdateUseCase refundUpdate) {
+        return controller(processWebhook, refundUpdate, mock(ProcessStripeCheckoutSessionUpdateUseCase.class));
+    }
+
+    private StripeWebhookController controller(
+            ProcessWebhookUseCase processWebhook,
+            ProcessStripeRefundUpdateUseCase refundUpdate,
+            ProcessStripeCheckoutSessionUpdateUseCase sessionUpdate) {
         return new StripeWebhookController(
                 new StripeWebhookSignatureVerifier(SECRET),
                 processWebhook,
                 refundUpdate,
+                sessionUpdate,
                 new ObjectMapper());
     }
 

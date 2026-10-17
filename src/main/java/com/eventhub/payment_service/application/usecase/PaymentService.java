@@ -8,6 +8,8 @@ import com.eventhub.payment_service.domain.event.PaymentRefundedEvent;
 import com.eventhub.payment_service.domain.model.Payment;
 import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.model.PaymentStatus;
+import com.eventhub.payment_service.domain.model.CheckoutAttempt;
+import com.eventhub.payment_service.domain.model.CheckoutAttemptStatus;
 import com.eventhub.payment_service.domain.model.StripeRefundResult;
 import com.eventhub.payment_service.domain.model.PaymentWebhookReceipt;
 import com.eventhub.payment_service.domain.port.in.GetPaymentUseCase;
@@ -16,11 +18,11 @@ import com.eventhub.payment_service.domain.port.in.ProcessWebhookUseCase;
 import com.eventhub.payment_service.domain.port.in.RefundPaymentUseCase;
 import com.eventhub.payment_service.domain.port.out.PaymentEventPublisherPort;
 import com.eventhub.payment_service.domain.port.out.PaymentRepositoryPort;
+import com.eventhub.payment_service.domain.port.out.CheckoutAttemptRepositoryPort;
 import com.eventhub.payment_service.domain.port.out.StripeRefundPort;
 import com.eventhub.payment_service.domain.port.out.PaymentWebhookReceiptRepositoryPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -41,16 +43,22 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase,
     private final PaymentEventPublisherPort paymentEventPublisherPort;
     private final PaymentWebhookReceiptRepositoryPort receiptRepositoryPort;
     private final StripeRefundPort stripeRefundPort;
-
-    @Value("${payment.currency:COP}")
-    private String configuredCurrency;
+    private final CheckoutAttemptRepositoryPort checkoutAttemptRepositoryPort;
 
     @Override
     @Transactional
     public Payment processWebhook(String bookingId, String transactionId, String idempotencyKey,
                                   PaymentProvider provider, BigDecimal amount, String currency,
                                   PaymentStatus status, String payloadHash) {
+        return processWebhook(bookingId, null, transactionId, idempotencyKey,
+                provider, amount, currency, status, payloadHash);
+    }
 
+    @Override
+    @Transactional
+    public Payment processWebhook(String bookingId, String attemptId, String transactionId, String idempotencyKey,
+                                  PaymentProvider provider, BigDecimal amount, String currency,
+                                  PaymentStatus status, String payloadHash) {
         validateWebhook(bookingId, transactionId, idempotencyKey, provider, amount, currency, status, payloadHash);
 
         Optional<PaymentWebhookReceipt> existingReceipt =
@@ -65,6 +73,14 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase,
                             "El registro idempotente no tiene un pago asociado"));
         }
 
+        Optional<CheckoutAttempt> checkoutAttempt = Optional.empty();
+        if (attemptId != null && !attemptId.isBlank()) {
+            checkoutAttempt = checkoutAttemptRepositoryPort.findByIdForUpdate(attemptId);
+            if (checkoutAttempt.isEmpty() || !bookingId.equals(checkoutAttempt.get().getBookingId())) {
+                throw new PaymentConflictException("El intento de Checkout no coincide con la reserva");
+            }
+        }
+
         Optional<Payment> transactionPayment =
                 paymentRepositoryPort.findByProviderAndTransactionIdForUpdate(provider, transactionId);
         if (transactionPayment.isPresent()
@@ -72,16 +88,25 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase,
             throw new PaymentConflictException("La transacción ya está asociada a otro pago");
         }
 
-        Optional<Payment> bookingPayment = paymentRepositoryPort.findByBookingIdForUpdate(bookingId);
-        Payment payment = bookingPayment.orElseGet(() -> Payment.builder()
+        Optional<Payment> attemptPayment = transactionPayment.isPresent()
+                ? transactionPayment
+                : checkoutAttempt.isPresent()
+                    ? paymentRepositoryPort.findByCheckoutAttemptIdForUpdate(attemptId)
+                    : paymentRepositoryPort.findByBookingIdForUpdate(bookingId);
+        if (attemptPayment.isPresent()
+                && attemptId != null && !attemptId.equals(attemptPayment.get().getCheckoutAttemptId())) {
+            throw new PaymentConflictException("El pago está asociado a otro intento de Checkout");
+        }
+        Payment payment = attemptPayment.orElseGet(() -> Payment.builder()
                 .bookingId(bookingId)
+                .checkoutAttemptId(attemptId)
                 .provider(provider)
                 .amount(amount)
                 .currency(currency)
                 .createdAt(LocalDateTime.now())
                 .build());
 
-        if (bookingPayment.isPresent()) {
+        if (attemptPayment.isPresent()) {
             ensureSamePaymentIdentity(payment, transactionId, provider, amount, currency);
             if (payment.getStatus() == PaymentStatus.APPROVED
                     || payment.getStatus() == PaymentStatus.REFUND_PENDING
@@ -94,6 +119,9 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase,
         }
 
         payment.setTransactionId(transactionId);
+        if (attemptId != null && !attemptId.isBlank()) {
+            payment.setCheckoutAttemptId(attemptId);
+        }
         payment.setIdempotencyKey(idempotencyKey);
         payment.setProvider(provider);
         payment.setAmount(amount);
@@ -104,6 +132,26 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase,
 
         Payment savedPayment = paymentRepositoryPort.save(payment);
         saveReceipt(provider, idempotencyKey, transactionId, bookingId, payloadHash, savedPayment);
+        if (checkoutAttempt.isPresent()) {
+            CheckoutAttempt attempt = checkoutAttempt.get();
+            if (status == PaymentStatus.APPROVED) {
+                attempt.setStatus(CheckoutAttemptStatus.COMPLETED);
+            } else if (attempt.getStatus() != CheckoutAttemptStatus.COMPLETED
+                    && attempt.getStatus() != CheckoutAttemptStatus.CLOSED) {
+                attempt.setStatus(CheckoutAttemptStatus.CLOSING);
+            }
+            attempt.setUpdatedAt(LocalDateTime.now());
+            checkoutAttemptRepositoryPort.save(attempt);
+        }
+        if (status == PaymentStatus.APPROVED) {
+            checkoutAttemptRepositoryPort.findActiveByBookingIdForUpdate(bookingId)
+                    .filter(activeAttempt -> !activeAttempt.getId().equals(attemptId))
+                    .ifPresent(activeAttempt -> {
+                        activeAttempt.setStatus(CheckoutAttemptStatus.CLOSING);
+                        activeAttempt.setUpdatedAt(LocalDateTime.now());
+                        checkoutAttemptRepositoryPort.save(activeAttempt);
+                    });
+        }
 
         if (status == PaymentStatus.APPROVED) {
             PaymentCompletedEvent completedEvent = PaymentCompletedEvent.builder()
@@ -144,7 +192,7 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase,
                 || idempotencyKey == null || idempotencyKey.isBlank() || provider == null || amount == null
                 || amount.signum() <= 0 || amount.scale() > 2
                 || amount.precision() - amount.scale() > 8 || currency == null
-                || !currency.equals(configuredCurrency) || payloadHash == null || payloadHash.isBlank()) {
+                || !currency.matches("[A-Z]{3}") || payloadHash == null || payloadHash.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El evento de pago contiene datos inválidos");
         }
         if (status != PaymentStatus.APPROVED && status != PaymentStatus.REJECTED) {
@@ -165,7 +213,7 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase,
                 || !currency.equals(payment.getCurrency())) {
             throw new PaymentConflictException("El proveedor, importe o moneda no coincide con el pago registrado");
         }
-        if (!transactionId.equals(payment.getTransactionId())) {
+        if (payment.getTransactionId() != null && !transactionId.equals(payment.getTransactionId())) {
             throw new PaymentConflictException("La reserva ya tiene otra transacción de pago activa");
         }
     }
@@ -195,8 +243,13 @@ public class PaymentService implements ProcessWebhookUseCase, GetPaymentUseCase,
                 || amount == null || currency == null || currency.isBlank()) {
             throw new IllegalArgumentException("La solicitud de reembolso contiene datos inválidos");
         }
-        Payment payment = paymentRepositoryPort.findByBookingIdForUpdate(bookingId)
-                .orElseThrow(() -> new PaymentConflictException("No existe un pago para la reserva"));
+        Optional<Payment> transactionPayment = paymentRepositoryPort.findByProviderAndTransactionIdForUpdate(
+                PaymentProvider.STRIPE, transactionId);
+        if (transactionPayment.isPresent() && !bookingId.equals(transactionPayment.get().getBookingId())) {
+            throw new PaymentConflictException("La transacción de reembolso pertenece a otra reserva");
+        }
+        Payment payment = transactionPayment.orElseGet(() -> paymentRepositoryPort.findByBookingIdForUpdate(bookingId)
+                .orElseThrow(() -> new PaymentConflictException("No existe un pago para la reserva")));
         if (!transactionId.equals(payment.getTransactionId())) {
             publishRefundFailure(payment, transactionId, "La transacción no coincide con el pago aprobado");
             return;

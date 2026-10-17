@@ -6,6 +6,7 @@ import com.eventhub.payment_service.domain.port.out.PaymentRepositoryPort;
 import com.eventhub.payment_service.infrastructure.adapter.out.persistence.entity.PaymentEntity;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
+import org.springframework.data.domain.PageRequest;
 
 import java.time.LocalDateTime;
 import java.util.Optional;
@@ -35,7 +36,7 @@ public class PaymentJpaAdapter implements PaymentRepositoryPort {
 
     @Override
     public Optional<Payment> findByBookingId(String bookingId) {
-        return repository.findByBookingId(bookingId).map(this::mapToDomain);
+        return repository.findFirstByBookingIdOrderByCreatedAtDesc(bookingId).map(this::mapToDomain);
     }
 
     @Override
@@ -45,7 +46,15 @@ public class PaymentJpaAdapter implements PaymentRepositoryPort {
 
     @Override
     public Optional<Payment> findByBookingIdForUpdate(String bookingId) {
-        return repository.findByBookingIdForUpdate(bookingId).map(this::mapToDomain);
+        return repository.findByBookingIdOrderByCreatedAtDesc(bookingId, PageRequest.of(0, 1))
+                .stream()
+                .findFirst()
+                .map(this::mapToDomain);
+    }
+
+    @Override
+    public Optional<Payment> findByCheckoutAttemptIdForUpdate(String checkoutAttemptId) {
+        return repository.findByCheckoutAttemptIdForUpdate(checkoutAttemptId).map(this::mapToDomain);
     }
 
     @Override
@@ -64,6 +73,7 @@ public class PaymentJpaAdapter implements PaymentRepositoryPort {
         return PaymentEntity.builder()
                 .id(domain.getId())
                 .bookingId(domain.getBookingId())
+                .checkoutAttemptId(domain.getCheckoutAttemptId())
                 .transactionId(domain.getTransactionId())
                 .idempotencyKey(domain.getIdempotencyKey())
                 .refundId(domain.getRefundId())
@@ -81,6 +91,7 @@ public class PaymentJpaAdapter implements PaymentRepositoryPort {
         return Payment.builder()
                 .id(entity.getId())
                 .bookingId(entity.getBookingId())
+                .checkoutAttemptId(entity.getCheckoutAttemptId())
                 .transactionId(entity.getTransactionId())
                 .idempotencyKey(entity.getIdempotencyKey())
                 .refundId(entity.getRefundId())

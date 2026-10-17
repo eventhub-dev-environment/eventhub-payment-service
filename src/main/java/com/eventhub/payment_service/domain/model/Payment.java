@@ -15,6 +15,7 @@ import java.time.LocalDateTime;
 public class Payment {
     private String id;
     private String bookingId;
+    private String checkoutAttemptId;
     private String transactionId; // ID entregado por la pasarela de pagos
     private String idempotencyKey;
     private String refundId;

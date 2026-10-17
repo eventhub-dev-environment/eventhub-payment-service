@@ -10,4 +10,8 @@ public interface ProcessWebhookUseCase {
     Payment processWebhook(String bookingId, String transactionId, String idempotencyKey,
                            PaymentProvider provider, BigDecimal amount, String currency,
                            PaymentStatus status, String payloadHash);
+
+    Payment processWebhook(String bookingId, String attemptId, String transactionId, String idempotencyKey,
+                           PaymentProvider provider, BigDecimal amount, String currency,
+                           PaymentStatus status, String payloadHash);
 }
