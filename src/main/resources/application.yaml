@@ -13,7 +13,12 @@ spring:
     password: ${RABBITMQ_PASS:guest}
 
 gateway:
-  internal-secret: ${GATEWAY_INTERNAL_SECRET:EventHubInternalSecretKey2026!}
+  internal-secret: ${GATEWAY_INTERNAL_SECRET:}
+
+payment:
+  currency: COP
+  webhook:
+    hmac-secret: ${PAYMENT_WEBHOOK_HMAC_SECRET:}
 
 management:
   endpoints:

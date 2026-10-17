@@ -1,6 +1,7 @@
 package com.eventhub.payment_service.infrastructure.adapter.out.persistence;
 
 import com.eventhub.payment_service.domain.model.Payment;
+import com.eventhub.payment_service.domain.model.PaymentProvider;
 import com.eventhub.payment_service.domain.port.out.PaymentRepositoryPort;
 import com.eventhub.payment_service.infrastructure.adapter.out.persistence.entity.PaymentEntity;
 import lombok.RequiredArgsConstructor;
@@ -42,15 +43,29 @@ public class PaymentJpaAdapter implements PaymentRepositoryPort {
         return repository.findByTransactionId(transactionId).map(this::mapToDomain);
     }
 
+    @Override
+    public Optional<Payment> findByBookingIdForUpdate(String bookingId) {
+        return repository.findByBookingIdForUpdate(bookingId).map(this::mapToDomain);
+    }
+
+    @Override
+    public Optional<Payment> findByProviderAndTransactionIdForUpdate(
+            PaymentProvider provider,
+            String transactionId) {
+        return repository.findByProviderAndTransactionIdForUpdate(provider, transactionId).map(this::mapToDomain);
+    }
+
     private PaymentEntity mapToEntity(Payment domain) {
         return PaymentEntity.builder()
                 .id(domain.getId())
                 .bookingId(domain.getBookingId())
                 .transactionId(domain.getTransactionId())
+                .idempotencyKey(domain.getIdempotencyKey())
                 .provider(domain.getProvider())
                 .amount(domain.getAmount())
+                .currency(domain.getCurrency())
                 .status(domain.getStatus())
-                .rawPayload(domain.getRawPayload())
+                .rawPayload(null)
                 .createdAt(domain.getCreatedAt())
                 .updatedAt(domain.getUpdatedAt())
                 .build();
@@ -61,10 +76,12 @@ public class PaymentJpaAdapter implements PaymentRepositoryPort {
                 .id(entity.getId())
                 .bookingId(entity.getBookingId())
                 .transactionId(entity.getTransactionId())
+                .idempotencyKey(entity.getIdempotencyKey())
                 .provider(entity.getProvider())
                 .amount(entity.getAmount())
+                .currency(entity.getCurrency())
                 .status(entity.getStatus())
-                .rawPayload(entity.getRawPayload())
+                .rawPayload(null)
                 .createdAt(entity.getCreatedAt())
                 .updatedAt(entity.getUpdatedAt())
                 .build();

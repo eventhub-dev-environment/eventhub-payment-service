@@ -16,8 +16,10 @@ public class Payment {
     private String id;
     private String bookingId;
     private String transactionId; // ID entregado por la pasarela de pagos
+    private String idempotencyKey;
     private PaymentProvider provider;
     private BigDecimal amount;
+    private String currency;
     private PaymentStatus status;
     private String rawPayload; // Payload crudo del webhook para auditoría
     private LocalDateTime createdAt;

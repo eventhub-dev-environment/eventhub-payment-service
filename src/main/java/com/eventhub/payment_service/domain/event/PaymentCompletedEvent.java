@@ -17,6 +17,7 @@ public class PaymentCompletedEvent {
     private String bookingId;
     private String transactionId;
     private BigDecimal amount;
+    private String currency;
     private String paymentProvider;
     private LocalDateTime completedAt;
 }

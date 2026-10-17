@@ -7,6 +7,7 @@ import com.eventhub.payment_service.domain.model.PaymentStatus;
 import java.math.BigDecimal;
 
 public interface ProcessWebhookUseCase {
-    Payment processWebhook(String bookingId, String transactionId, PaymentProvider provider,
-                           BigDecimal amount, PaymentStatus status, String rawPayload);
+    Payment processWebhook(String bookingId, String transactionId, String idempotencyKey,
+                           PaymentProvider provider, BigDecimal amount, String currency,
+                           PaymentStatus status, String payloadHash);
 }
