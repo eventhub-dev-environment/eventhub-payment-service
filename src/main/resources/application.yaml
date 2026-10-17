@@ -6,6 +6,12 @@ spring:
     name: payment-service
   profiles:
     active: dev
+  flyway:
+    baseline-on-migrate: false
+    baseline-version: 1
+  jpa:
+    hibernate:
+      ddl-auto: validate
   rabbitmq:
     host: ${SPRING_RABBITMQ_HOST:localhost}
     port: 5672
