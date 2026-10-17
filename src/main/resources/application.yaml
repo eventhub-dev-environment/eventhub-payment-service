@@ -6,14 +6,39 @@ spring:
     name: payment-service
   profiles:
     active: dev
+  http:
+    converters:
+      preferred-json-mapper: jackson2
+  flyway:
+    baseline-on-migrate: false
+    baseline-version: 1
+  jpa:
+    hibernate:
+      ddl-auto: validate
   rabbitmq:
     host: ${SPRING_RABBITMQ_HOST:localhost}
     port: 5672
     username: ${RABBITMQ_USER:guest}
     password: ${RABBITMQ_PASS:guest}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
 
 gateway:
-  internal-secret: ${GATEWAY_INTERNAL_SECRET:EventHubInternalSecretKey2026!}
+  internal-secret: ${GATEWAY_INTERNAL_SECRET:}
+
+payment:
+  currency: COP
+  booking-service-url: ${BOOKING_SERVICE_URL:http://booking-service:8084}
+  checkout:
+    success-url: ${PAYMENT_CHECKOUT_SUCCESS_URL:}
+    cancel-url: ${PAYMENT_CHECKOUT_CANCEL_URL:}
+  stripe:
+    secret-key: ${STRIPE_SECRET_KEY:}
+  webhook:
+    hmac-secret: ${PAYMENT_WEBHOOK_HMAC_SECRET:}
+    stripe-secret: ${STRIPE_WEBHOOK_SECRET:}
 
 management:
   endpoints:
