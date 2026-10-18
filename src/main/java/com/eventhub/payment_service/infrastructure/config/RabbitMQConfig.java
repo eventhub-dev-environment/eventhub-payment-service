@@ -24,12 +24,15 @@ public class RabbitMQConfig {
     // Colas
     public static final String PAYMENT_COMPLETED_QUEUE = "payment.completed.queue";
     public static final String PAYMENT_FAILED_QUEUE = "payment.failed.queue";
+    public static final String PAYMENT_DEAD_LETTER_EXCHANGE = "booking.payment.dlx";
 
     // Routing Keys
     public static final String PAYMENT_COMPLETED_KEY = "payment.completed";
     public static final String PAYMENT_FAILED_KEY = "payment.failed";
     public static final String PAYMENT_REFUNDED_KEY = "payment.refunded";
     public static final String PAYMENT_REFUND_FAILED_KEY = "payment.refund.failed";
+    public static final String PAYMENT_COMPLETED_DLQ_KEY = "payment.completed.dead";
+    public static final String PAYMENT_FAILED_DLQ_KEY = "payment.failed.dead";
 
     @Bean
     public TopicExchange paymentExchange() {
@@ -79,12 +82,18 @@ public class RabbitMQConfig {
 
     @Bean
     public Queue paymentCompletedQueue() {
-        return QueueBuilder.durable(PAYMENT_COMPLETED_QUEUE).build();
+        return QueueBuilder.durable(PAYMENT_COMPLETED_QUEUE)
+                .deadLetterExchange(PAYMENT_DEAD_LETTER_EXCHANGE)
+                .deadLetterRoutingKey(PAYMENT_COMPLETED_DLQ_KEY)
+                .build();
     }
 
     @Bean
     public Queue paymentFailedQueue() {
-        return QueueBuilder.durable(PAYMENT_FAILED_QUEUE).build();
+        return QueueBuilder.durable(PAYMENT_FAILED_QUEUE)
+                .deadLetterExchange(PAYMENT_DEAD_LETTER_EXCHANGE)
+                .deadLetterRoutingKey(PAYMENT_FAILED_DLQ_KEY)
+                .build();
     }
 
     @Bean
